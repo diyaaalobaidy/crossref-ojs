@@ -383,14 +383,26 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
      */
     public function depositSubmissions(array $submissions, Context $context): array
     {
-        $filterName = $this->_exportPlugin->getSubmissionFilter();
-        $responseMessage = '';
-        $status = $this->_exportPlugin->exportAndDeposit($context, $submissions, $filterName, $responseMessage);
+        try {
+            $filterName = $this->_exportPlugin->getSubmissionFilter();
+            $responseMessage = '';
+            $status = $this->_exportPlugin->exportAndDeposit($context, $submissions, $filterName, $responseMessage);
 
-        return [
-            'hasErrors' => !$status,
-            'responseMessage' => $responseMessage
-        ];
+            if (!$status) {
+                error_log("CrossrefPlugin::depositSubmissions failed with response: {$responseMessage}");
+            }
+
+            return [
+                'hasErrors' => !$status,
+                'responseMessage' => $responseMessage
+            ];
+        } catch (\Throwable $e) {
+            error_log('CrossrefPlugin::depositSubmissions unexpected error: ' . $e->getMessage() . PHP_EOL . $e->getTraceAsString());
+            return [
+                'hasErrors' => true,
+                'responseMessage' => 'api.dois.400.depositFailed'
+            ];
+        }
     }
 
     /**
@@ -398,14 +410,26 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
      */
     public function depositPeerReviews(array $peerReviews, Context $context): array
     {
-        $filterName = $this->_exportPlugin->getPeerReviewFilter();
-        $responseMessage = '';
-        $status = $this->_exportPlugin->exportAndDeposit($context, $peerReviews, $filterName, $responseMessage);
+        try {
+            $filterName = $this->_exportPlugin->getPeerReviewFilter();
+            $responseMessage = '';
+            $status = $this->_exportPlugin->exportAndDeposit($context, $peerReviews, $filterName, $responseMessage);
 
-        return [
-            'hasErrors' => !$status,
-            'responseMessage' => $responseMessage
-        ];
+            if (!$status) {
+                error_log("CrossrefPlugin::depositPeerReviews failed with response: {$responseMessage}");
+            }
+
+            return [
+                'hasErrors' => !$status,
+                'responseMessage' => $responseMessage
+            ];
+        } catch (\Throwable $e) {
+            error_log('CrossrefPlugin::depositPeerReviews unexpected error: ' . $e->getMessage() . PHP_EOL . $e->getTraceAsString());
+            return [
+                'hasErrors' => true,
+                'responseMessage' => 'api.dois.400.depositFailed'
+            ];
+        }
     }
     /**
      * @param Issue[] $issues
@@ -425,14 +449,26 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
      */
     public function depositIssues(array $issues, Context $context): array
     {
-        $filterName = $this->_exportPlugin->getIssueFilter();
-        $responseMessage = '';
-        $status = $this->_exportPlugin->exportAndDeposit($context, $issues, $filterName, $responseMessage);
+        try {
+            $filterName = $this->_exportPlugin->getIssueFilter();
+            $responseMessage = '';
+            $status = $this->_exportPlugin->exportAndDeposit($context, $issues, $filterName, $responseMessage);
 
-        return [
-            'hasErrors' => !$status,
-            'responseMessage' => $responseMessage
-        ];
+            if (!$status) {
+                error_log("CrossrefPlugin::depositIssues failed with response: {$responseMessage}");
+            }
+
+            return [
+                'hasErrors' => !$status,
+                'responseMessage' => $responseMessage
+            ];
+        } catch (\Throwable $e) {
+            error_log('CrossrefPlugin::depositIssues unexpected error: ' . $e->getMessage() . PHP_EOL . $e->getTraceAsString());
+            return [
+                'hasErrors' => true,
+                'responseMessage' => 'api.dois.400.depositFailed'
+            ];
+        }
     }
 
     /**

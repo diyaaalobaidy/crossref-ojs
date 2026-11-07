@@ -157,4 +157,87 @@ class CrossrefExportPluginTest extends PKPTestCase
 
         $this->assertTrue($plugin->depositXML($objects, $context, $this->filename));
     }
+
+    /**
+     * A deposit response containing failure diagnostics records the error and extracts all messages
+     */
+    public function testDiagnosticFailureResponseRecordsError(): void
+    {
+        $body = '<doi_batch_diagnostic status="completed"><submission_id>1</submission_id><batch_id>batch-1</batch_id>'
+            . '<record_diagnostic status="Failure"><doi>10.1234/test.1</doi><msg>Record not processed</msg></record_diagnostic>'
+            . '<batch_data><failure_count>1</failure_count><warning_count>0</warning_count></batch_data></doi_batch_diagnostic>';
+        $this->mockDepositResult(new Response(200, [], $body));
+
+        $context = Mockery::mock(Journal::class);
+        $context->shouldReceive('getId')->andReturn(1);
+        $objects = new Submission();
+
+        $plugin = Mockery::mock(CrossrefExportPlugin::class)->makePartial();
+        $plugin->shouldReceive('getSetting')->andReturn('');
+        $plugin->shouldReceive('isTestMode')->andReturn(false);
+        $plugin->shouldReceive('updateDepositStatus')
+            ->once()
+            ->with($context, $objects, Doi::STATUS_ERROR, 'batch-1', Mockery::on(function ($msg) use ($body) {
+                return str_contains($msg, '[DOI 10.1234/test.1] Record not processed') && str_contains($msg, $body);
+            }), null);
+
+        $result = $plugin->depositXML($objects, $context, $this->filename);
+        $this->assertIsArray($result);
+        $this->assertSame('plugins.importexport.common.register.error.mdsError', $result[0][0]);
+        $this->assertStringContainsString('[DOI 10.1234/test.1] Record not processed', $result[0][1]);
+    }
+
+    /**
+     * A deposit response with root status="Failure" and no failure_count records the error
+     */
+    public function testRootStatusFailureWithoutFailureCountRecordsError(): void
+    {
+        $body = '<doi_batch_diagnostic status="Failure"><batch_id>batch-99</batch_id>'
+            . '<msg>Missing required element</msg></doi_batch_diagnostic>';
+        $this->mockDepositResult(new Response(200, [], $body));
+
+        $context = Mockery::mock(Journal::class);
+        $context->shouldReceive('getId')->andReturn(1);
+        $objects = new Submission();
+
+        $plugin = Mockery::mock(CrossrefExportPlugin::class)->makePartial();
+        $plugin->shouldReceive('getSetting')->andReturn('');
+        $plugin->shouldReceive('isTestMode')->andReturn(false);
+        $plugin->shouldReceive('updateDepositStatus')
+            ->once()
+            ->with($context, $objects, Doi::STATUS_ERROR, 'batch-99', Mockery::on(function ($msg) use ($body) {
+                return str_contains($msg, 'Missing required element') && str_contains($msg, $body);
+            }), null);
+
+        $result = $plugin->depositXML($objects, $context, $this->filename);
+        $this->assertIsArray($result);
+        $this->assertSame('plugins.importexport.common.register.error.mdsError', $result[0][0]);
+        $this->assertStringContainsString('Missing required element', $result[0][1]);
+    }
+
+    /**
+     * A deposit response that is invalid XML records an error and does not throw an exception
+     */
+    public function testNonXmlResponseRecordsError(): void
+    {
+        $body = '<html><body>502 Bad Gateway</body></html>';
+        $this->mockDepositResult(new Response(200, [], $body));
+
+        $context = Mockery::mock(Journal::class);
+        $context->shouldReceive('getId')->andReturn(1);
+        $objects = new Submission();
+
+        $plugin = Mockery::mock(CrossrefExportPlugin::class)->makePartial();
+        $plugin->shouldReceive('getSetting')->andReturn('');
+        $plugin->shouldReceive('isTestMode')->andReturn(false);
+        $plugin->shouldReceive('updateDepositStatus')
+            ->once()
+            ->with($context, $objects, Doi::STATUS_ERROR, null, Mockery::on(function ($msg) use ($body) {
+                return str_contains($msg, 'Invalid XML response from Crossref') && str_contains($msg, $body);
+            }), null);
+
+        $result = $plugin->depositXML($objects, $context, $this->filename);
+        $this->assertIsArray($result);
+        $this->assertSame('plugins.importexport.common.register.error.mdsError', $result[0][0]);
+    }
 }

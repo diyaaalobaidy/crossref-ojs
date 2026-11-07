@@ -164,9 +164,13 @@ class CrossrefCitationDoiHandler
      */
     public function handleDepositResponse(string $responseBody, Submission $submission): void
     {
+        $prevUseErrors = libxml_use_internal_errors(true);
         $xmlDoc = new DOMDocument();
-        $xmlDoc->loadXML($responseBody);
-        if ($xmlDoc->getElementsByTagName('citations_diagnostic')->length > 0) {
+        $loaded = @$xmlDoc->loadXML($responseBody);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prevUseErrors);
+
+        if ($loaded && $xmlDoc->getElementsByTagName('citations_diagnostic')->length > 0) {
             $citationsDiagnosticNode = $xmlDoc->getElementsByTagName('citations_diagnostic')->item(0);
             $citationsDiagnosticCode = $citationsDiagnosticNode->getAttribute('deferred');
             $submission->setData($this->getCitationsDiagnosticIdSettingName(), $citationsDiagnosticCode);
@@ -267,7 +271,7 @@ class CrossrefCitationDoiHandler
         $httpClient = Application::get()->getHttpClient();
         try {
             $response = $httpClient->request('POST', $url);
-        } catch (\GuzzleHttp\Exception\RequestException $e) {
+        } catch (\Throwable $e) {
             error_log('Crossref getResolvedRefs failed for DOI ' . $doi . ': ' . $e->getMessage());
             return null;
         }

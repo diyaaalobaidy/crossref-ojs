@@ -111,7 +111,7 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
     /**
      * @copydoc PubObjectsExportPlugin::getStatusMessage()
      */
-    public function getStatusMessage(Request $request): ?string
+    public function getStatusMessage($request)
     {
         // Application is set to sandbox mode and will not run the features of plugin
         if (Config::getVar('general', 'sandbox', false)) {
@@ -121,14 +121,61 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
 
         // if the failure occurred on request and the message was saved
         // return that message
-        $articleId = $request->getUserVar('articleId');
-        $article = Repo::submission()->get((int)$articleId);
-        $failedMsg = $article->getData('doiObject')->getData($this->getFailedMsgSettingName());
+        $failedMsg = null;
+        $doiId = $request->getUserVar('doiId');
+        if (!empty($doiId)) {
+            $doi = Repo::doi()->get((int)$doiId);
+            $failedMsg = $doi?->getData($this->getFailedMsgSettingName());
+        }
+
+        if (empty($failedMsg)) {
+            $articleId = $request->getUserVar('articleId') ?? $request->getUserVar('submissionId');
+            if (!empty($articleId)) {
+                $article = Repo::submission()->get((int)$articleId);
+                if ($article) {
+                    $publishedDois = Repo::doi()->getPublishedDoisForSubmission($article->getId());
+                    if (empty($publishedDois)) {
+                        $publishedDois = Repo::doi()->getDoisForSubmission($article->getId());
+                    }
+                    foreach ($publishedDois as $pDoiId) {
+                        $pDoi = Repo::doi()->get($pDoiId);
+                        $msg = $pDoi?->getData($this->getFailedMsgSettingName());
+                        if (!empty($msg)) {
+                            $failedMsg = $msg;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (empty($failedMsg)) {
+            $issueId = $request->getUserVar('issueId');
+            if (!empty($issueId)) {
+                $issue = Repo::issue()->get((int)$issueId);
+                if ($issue) {
+                    $issueDois = Repo::doi()->getDoisForIssue($issue->getId(), true);
+                    foreach ($issueDois as $iDoiId) {
+                        $iDoi = Repo::doi()->get($iDoiId);
+                        $msg = $iDoi?->getData($this->getFailedMsgSettingName());
+                        if (!empty($msg)) {
+                            $failedMsg = $msg;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         if (!empty($failedMsg)) {
             return $failedMsg;
         }
 
         $context = $request->getContext();
+        $batchId = $request->getUserVar('batchId');
+        if (empty($batchId)) {
+            return __('plugins.importexport.crossref.status.failed');
+        }
 
         $httpClient = Application::get()->getHttpClient();
         try {
@@ -137,7 +184,7 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
                 $this->isTestMode($context) ? static::CROSSREF_API_STATUS_URL_DEV : static::CROSSREF_API_STATUS_URL,
                 [
                     'form_params' => [
-                        'doi_batch_id' => $request->getUserVar('batchId'),
+                        'doi_batch_id' => $batchId,
                         'type' => 'result',
                         'usr' => $this->getSetting($context->getId(), 'username'),
                         'pwd' => $this->getSetting($context->getId(), 'password'),
@@ -149,10 +196,18 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
             if ($e->hasResponse()) {
                 $returnMessage = $e->getResponse()->getBody() . ' (' . $e->getResponse()->getStatusCode() . ' ' . $e->getResponse()->getReasonPhrase() . ')';
             }
+            error_log('CrossrefPlugin::getStatusMessage error: ' . preg_replace('/([?&](?:usr|pwd)=)[^&]*/', '$1*****', $returnMessage));
             return __('plugins.importexport.common.register.error.mdsError', ['param' => $returnMessage]);
         }
 
-        return (string) $response->getBody();
+        $body = (string) $response->getBody();
+        $details = $this->_parseCrossrefDiagnosticXml($body);
+        if (!empty($details['errors'])) {
+            error_log("Crossref batch {$batchId} returned diagnostic errors: " . implode('; ', $details['errors']));
+            return implode(PHP_EOL, $details['errors']) . PHP_EOL . PHP_EOL . $body;
+        }
+
+        return $body;
     }
 
     /**
@@ -235,35 +290,53 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
         // Thus the foreach loop, but every object will be in an one item array for
         // the export and filter to work.
         foreach ($objects as $object) {
-            // Get the XML
-            // Supply an exportErrors array because otherwise exportXML() will echo out export errors
-            $exportErrors = [];
-            $exportXml = $this->exportXML([$object], $filter, $context, $noValidation, $exportErrors);
-            // Only schema validity errors (libxml XML_SCHEMAV_* codes) mean invalid XML; if the schema could not be loaded, let Crossref validate it
-            $validityErrors = array_filter($exportErrors, fn (\LibXMLError $error) => $error->code >= 1800 && $error->code < 1900);
-            if (!empty($validityErrors)) {
-                $messages = array_unique(array_map(fn (\LibXMLError $error) => trim($error->message), $validityErrors));
-                $failedMsg = __('plugins.importexport.crossref.export.error.validation') . PHP_EOL . implode(PHP_EOL, $messages);
-                $this->updateDepositStatus($context, $object, Doi::STATUS_ERROR, null, $failedMsg);
-                $resultErrors[] = [['plugins.importexport.crossref.export.error.validation']];
-                continue;
-            }
-            // Write the XML to a file.
-            // export file name example: crossref-20160723-160036-articles-1-1.xml
             $objectFileNamePart = $this->_getObjectFileNamePart($object);
-            $exportFileName = $this->getExportFileName($this->getExportPath(), $objectFileNamePart, $context, '.xml');
-            $fileManager->writeFile($exportFileName, $exportXml);
-            // Deposit the XML file.
-            $result = $this->depositXML($object, $context, $exportFileName);
-            if (!$result) {
+            try {
+                // Get the XML
+                // Supply an exportErrors array because otherwise exportXML() will echo out export errors
+                $exportErrors = [];
+                $exportXml = $this->exportXML([$object], $filter, $context, $noValidation, $exportErrors);
+                // Only schema validity errors (libxml XML_SCHEMAV_* codes) mean invalid XML; if the schema could not be loaded, let Crossref validate it
+                $validityErrors = array_filter($exportErrors, fn (\LibXMLError $error) => $error->code >= 1800 && $error->code < 1900);
+                if (!empty($validityErrors)) {
+                    $messages = array_unique(array_map(fn (\LibXMLError $error) => trim($error->message), $validityErrors));
+                    $failedMsg = __('plugins.importexport.crossref.export.error.validation') . PHP_EOL . implode(PHP_EOL, $messages);
+                    error_log("Crossref XML validation error for object {$objectFileNamePart}: {$failedMsg}");
+                    $this->updateDepositStatus($context, $object, Doi::STATUS_ERROR, null, $failedMsg);
+                    $resultErrors[] = [['plugins.importexport.crossref.export.error.validation']];
+                    $errorsOccurred = true;
+                    continue;
+                }
+                if (empty($exportXml)) {
+                    $failedMsg = "Failed to generate Crossref XML for object {$objectFileNamePart}";
+                    error_log("Crossref export XML error: {$failedMsg}");
+                    $this->updateDepositStatus($context, $object, Doi::STATUS_ERROR, null, $failedMsg);
+                    $resultErrors[] = [['plugins.importexport.common.register.error.mdsError', $failedMsg]];
+                    $errorsOccurred = true;
+                    continue;
+                }
+                // Write the XML to a file.
+                // export file name example: crossref-20160723-160036-articles-1-1.xml
+                $exportFileName = $this->getExportFileName($this->getExportPath(), $objectFileNamePart, $context, '.xml');
+                $fileManager->writeFile($exportFileName, $exportXml);
+                // Deposit the XML file.
+                $result = $this->depositXML($object, $context, $exportFileName);
+                if (!$result || (is_array($result) && !$this->isWarningResult($result))) {
+                    $errorsOccurred = true;
+                }
+                // Warnings are returned as an array too, but the DOI is registered
+                if (is_array($result) && !$this->isWarningResult($result)) {
+                    $resultErrors[] = $result;
+                }
+                // Remove all temporary files.
+                $fileManager->deleteByPath($exportFileName);
+            } catch (\Throwable $e) {
+                $errorMsg = "Unexpected error during Crossref deposit for object {$objectFileNamePart}: " . $e->getMessage();
+                error_log($errorMsg . PHP_EOL . $e->getTraceAsString());
+                $this->updateDepositStatus($context, $object, Doi::STATUS_ERROR, null, $errorMsg);
+                $resultErrors[] = [['plugins.importexport.common.register.error.mdsError', $errorMsg]];
                 $errorsOccurred = true;
             }
-            // Warnings are returned as an array too, but the DOI is registered
-            if (is_array($result) && !$this->isWarningResult($result)) {
-                $resultErrors[] = $result;
-            }
-            // Remove all temporary files.
-            $fileManager->deleteByPath($exportFileName);
         }
         // Prepare response message and return status
         if (empty($resultErrors)) {
@@ -320,6 +393,7 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
             return false;
         }
 
+        $objectPart = $this->_getObjectFileNamePart($objects);
         $status = null;
         $msgSave = null;
 
@@ -354,17 +428,17 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
         } catch (TransferException $e) {
             $returnMessage = $e->getMessage();
             if ($e instanceof RequestException && $e->hasResponse()) {
-                $eResponseBody = $e->getResponse()->getBody();
+                $eResponseBody = (string) $e->getResponse()->getBody();
                 $eStatusCode = $e->getResponse()->getStatusCode();
                 if ($eStatusCode == static::CROSSREF_API_DEPOSIT_ERROR_FROM_CROSSREF) {
-                    $xmlDoc = new \DOMDocument('1.0', 'utf-8');
-                    $xmlDoc->loadXML($eResponseBody);
-                    $batchIdNode = $xmlDoc->getElementsByTagName('batch_id')->item(0);
-                    $msg = $xmlDoc->getElementsByTagName('msg')->item(0)->nodeValue;
+                    $xmlDetails = $this->_parseCrossrefDiagnosticXml($eResponseBody);
+                    $msg = !empty($xmlDetails['errors']) ? implode(PHP_EOL, $xmlDetails['errors']) : $eResponseBody;
                     $msgSave = $msg . PHP_EOL . $eResponseBody;
                     $status = Doi::STATUS_ERROR;
-                    $this->updateDepositStatus($context, $objects, $status, $batchIdNode->nodeValue, $msgSave);
+                    $batchId = $xmlDetails['batchId'] ?? null;
+                    $this->updateDepositStatus($context, $objects, $status, $batchId, $msgSave);
                     $returnMessage = $msg . ' (' . $eStatusCode . ' ' . $e->getResponse()->getReasonPhrase() . ')';
+                    error_log("Crossref deposit error (HTTP {$eStatusCode}) for object {$objectPart}: {$returnMessage}");
                 } elseif ($eStatusCode == static::CROSSREF_API_DEPOSIT_ERROR_UNAUTHORIZED) {
                     if ($this->isTestMode($context)) {
                         $errorString = __('plugins.importexport.crossref.settings.form.testModeActive');
@@ -373,58 +447,71 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
                     }
                     $returnMessage = $errorString . ' (' . $eStatusCode . ' ' . $e->getResponse()->getReasonPhrase() . ')';
                     $this->updateDepositStatus($context, $objects, Doi::STATUS_ERROR, null, $returnMessage);
+                    error_log("Crossref deposit unauthorized (HTTP {$eStatusCode}) for object {$objectPart}: {$returnMessage}");
                 } else {
                     $returnMessage = $eResponseBody . ' (' . $eStatusCode . ' ' . $e->getResponse()->getReasonPhrase() . ')';
                     $this->updateDepositStatus($context, $objects, Doi::STATUS_ERROR, null, $returnMessage);
+                    error_log("Crossref deposit HTTP error {$eStatusCode} for object {$objectPart}: {$returnMessage}");
                 }
             } else {
                 // No answer from Crossref, so the status would stay "Submitted"
                 $this->updateDepositStatus($context, $objects, Doi::STATUS_ERROR, null, $returnMessage);
+                error_log("Crossref deposit network error for object {$objectPart}: {$returnMessage}");
             }
             return [['plugins.importexport.common.register.error.mdsError', $returnMessage]];
         }
 
-        // Get DOMDocument from the response XML string
-        $xmlDoc = new \DOMDocument('1.0', 'utf-8');
-        $xmlDoc->loadXML($response->getBody());
-        $batchIdNode = $xmlDoc->getElementsByTagName('batch_id')->item(0);
-        $submissionIdNode = $xmlDoc->getElementsByTagName('submission_id')->item(0);
-        $successMessage = __('plugins.generic.crossref.successMessage', ['submissionId' => $submissionIdNode->nodeValue]);
+        $body = (string) $response->getBody();
+        $xmlDetails = $this->_parseCrossrefDiagnosticXml($body);
 
-        // Get the DOI deposit status
-        // If the deposit failed
-        $failureCountNode = $xmlDoc->getElementsByTagName('failure_count')->item(0);
-        $failureCount = (int) $failureCountNode->nodeValue;
-        if ($failureCount > 0) {
+        if (!$xmlDetails['isValidXml']) {
             $status = Doi::STATUS_ERROR;
-            $result = false;
-            $msgs = array_map(fn (\DOMElement $msg) => trim($msg->nodeValue), iterator_to_array($xmlDoc->getElementsByTagName('msg')));
-            $msgSave = trim(implode(PHP_EOL, array_unique(array_filter($msgs))) . PHP_EOL . $response->getBody());
-        } else {
-            // Deposit was received
-            $status = Doi::STATUS_REGISTERED;
-            $result = true;
-
-            // If there were some warnings, display them
-            $warningCountNode = $xmlDoc->getElementsByTagName('warning_count')->item(0);
-            $warningCount = (int) $warningCountNode->nodeValue;
-            if ($warningCount > 0) {
-                $result = [['plugins.importexport.crossref.register.success.warning', htmlspecialchars($response->getBody())]];
-                $successMessage .= PHP_EOL . __('plugins.importexport.crossref.register.success.warnings');
-            }
-
-            // A possibility for other plugins to work with the response
-            Hook::run('crossrefexportplugin::deposited', [[$this, $response->getBody(), $objects]]);
-
-            if ($objects instanceof Submission) {
-                $this->agencyPlugin->getCitationDoiHandler()?->handleDepositResponse((string) $response->getBody(), $objects);
-            }
+            $errorMsg = 'Invalid XML response from Crossref: ' . substr(strip_tags($body), 0, 500);
+            $msgSave = $errorMsg . PHP_EOL . $body;
+            error_log("Crossref deposit invalid XML response for object {$objectPart}: {$body}");
+            $this->updateDepositStatus($context, $objects, $status, null, $msgSave, null);
+            return [['plugins.importexport.common.register.error.mdsError', $msgSave]];
         }
 
-        // Update the status
-        if ($status) {
-            $this->updateDepositStatus($context, $objects, $status, $batchIdNode->nodeValue, $msgSave, $successMessage);
+        $batchId = $xmlDetails['batchId'];
+        $submissionId = $xmlDetails['submissionId'];
+        $failureCount = $xmlDetails['failureCount'];
+        $warningCount = $xmlDetails['warningCount'];
+
+        $hasErrors = ($failureCount !== null && $failureCount > 0)
+            || !empty($xmlDetails['errors'])
+            || in_array(strtolower($xmlDetails['status'] ?? ''), ['failure', 'failed']);
+
+        if ($hasErrors) {
+            $status = Doi::STATUS_ERROR;
+            $errorSummary = !empty($xmlDetails['errors'])
+                ? implode(PHP_EOL, $xmlDetails['errors'])
+                : "Crossref deposit failed with failure count: {$failureCount}";
+            $msgSave = trim($errorSummary . PHP_EOL . PHP_EOL . $body);
+            error_log("Crossref deposit diagnostic failure for object {$objectPart}: {$errorSummary}");
+            $this->updateDepositStatus($context, $objects, $status, $batchId, $msgSave, null);
+            return [['plugins.importexport.common.register.error.mdsError', $msgSave]];
         }
+
+        $status = Doi::STATUS_REGISTERED;
+        $result = true;
+        $successMessage = $submissionId
+            ? __('plugins.generic.crossref.successMessage', ['submissionId' => $submissionId])
+            : __('plugins.importexport.crossref.status.registered');
+
+        if ($warningCount > 0 || !empty($xmlDetails['warnings'])) {
+            $result = [['plugins.importexport.crossref.register.success.warning', htmlspecialchars($body)]];
+            $successMessage .= PHP_EOL . __('plugins.importexport.crossref.register.success.warnings');
+        }
+
+        // A possibility for other plugins to work with the response
+        Hook::run('crossrefexportplugin::deposited', [[$this, $body, $objects]]);
+
+        if ($objects instanceof Submission) {
+            $this->agencyPlugin->getCitationDoiHandler()?->handleDepositResponse($body, $objects);
+        }
+
+        $this->updateDepositStatus($context, $objects, $status, $batchId, null, $successMessage);
 
         return $result;
     }
@@ -436,6 +523,9 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
     {
         if ($object instanceof Submission) {
             $doiIds = Repo::doi()->getPublishedDoisForSubmission($object->getId());
+            if (empty($doiIds)) {
+                $doiIds = Repo::doi()->getDoisForSubmission($object->getId());
+            }
         } else if ($object instanceof Issue) {
             $doiIds = Repo::doi()->getDoisForIssue($object->getId(), true);
         } else {
@@ -444,6 +534,9 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
 
         foreach ($doiIds as $doiId) {
             $doi = Repo::doi()->get($doiId);
+            if (!$doi) {
+                continue;
+            }
 
             $editParams = [
                 'status' => $status,
@@ -459,6 +552,149 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
 
             Repo::doi()->edit($doi, $editParams);
         }
+    }
+
+    /**
+     * Safely parse Crossref deposit diagnostic XML and extract all error and warning details.
+     *
+     * @return array{
+     *     isValidXml: bool,
+     *     batchId: ?string,
+     *     submissionId: ?string,
+     *     status: ?string,
+     *     failureCount: ?int,
+     *     warningCount: int,
+     *     errors: string[],
+     *     warnings: string[]
+     * }
+     */
+    public function _parseCrossrefDiagnosticXml(string $xmlString): array
+    {
+        $result = [
+            'isValidXml' => false,
+            'batchId' => null,
+            'submissionId' => null,
+            'status' => null,
+            'failureCount' => null,
+            'warningCount' => 0,
+            'errors' => [],
+            'warnings' => [],
+        ];
+
+        if (trim($xmlString) === '' || !str_contains($xmlString, '<')) {
+            return $result;
+        }
+
+        $prevUseErrors = libxml_use_internal_errors(true);
+        $xmlDoc = new \DOMDocument('1.0', 'utf-8');
+        $loaded = @$xmlDoc->loadXML($xmlString);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prevUseErrors);
+
+        if (!$loaded || !$xmlDoc->documentElement) {
+            return $result;
+        }
+
+        $rootName = strtolower($xmlDoc->documentElement->localName ?? $xmlDoc->documentElement->tagName);
+        if ($rootName !== 'doi_batch_diagnostic' && $rootName !== 'crossref_result') {
+            return $result;
+        }
+
+        $result['isValidXml'] = true;
+
+        if ($xmlDoc->documentElement->hasAttribute('status')) {
+            $result['status'] = $xmlDoc->documentElement->getAttribute('status');
+        }
+
+        $batchIdNode = $xmlDoc->getElementsByTagName('batch_id')->item(0);
+        if ($batchIdNode) {
+            $result['batchId'] = trim($batchIdNode->nodeValue);
+        }
+
+        $submissionIdNode = $xmlDoc->getElementsByTagName('submission_id')->item(0);
+        if ($submissionIdNode) {
+            $result['submissionId'] = trim($submissionIdNode->nodeValue);
+        }
+
+        $failureCountNode = $xmlDoc->getElementsByTagName('failure_count')->item(0);
+        if ($failureCountNode !== null) {
+            $result['failureCount'] = (int) $failureCountNode->nodeValue;
+        }
+
+        $warningCountNode = $xmlDoc->getElementsByTagName('warning_count')->item(0);
+        if ($warningCountNode !== null) {
+            $result['warningCount'] = (int) $warningCountNode->nodeValue;
+        }
+
+        $collectedErrors = [];
+        $collectedWarnings = [];
+
+        // 1. Process record_diagnostic elements
+        $recordDiagnostics = $xmlDoc->getElementsByTagName('record_diagnostic');
+        foreach ($recordDiagnostics as $diag) {
+            $diagStatus = strtolower($diag->getAttribute('status'));
+            $doiNode = $diag->getElementsByTagName('doi')->item(0);
+            $doi = $doiNode ? trim($doiNode->nodeValue) : null;
+
+            $diagMsgs = [];
+            foreach ($diag->getElementsByTagName('msg') as $m) {
+                $val = trim($m->nodeValue);
+                if ($val !== '') {
+                    $diagMsgs[] = $val;
+                }
+            }
+
+            if (empty($diagMsgs)) {
+                $text = trim($diag->textContent);
+                if ($doi && str_starts_with($text, $doi)) {
+                    $text = trim(substr($text, strlen($doi)));
+                }
+                if ($text !== '') {
+                    $diagMsgs[] = $text;
+                }
+            }
+
+            $prefix = $doi ? "[DOI {$doi}] " : '';
+            foreach ($diagMsgs as $msgText) {
+                $formatted = $prefix . $msgText;
+                if ($diagStatus === 'warning') {
+                    $collectedWarnings[] = $formatted;
+                } else {
+                    $collectedErrors[] = $formatted;
+                }
+            }
+        }
+
+        // 2. Process all top-level or other msg elements
+        $allMsgs = $xmlDoc->getElementsByTagName('msg');
+        foreach ($allMsgs as $m) {
+            if ($m->parentNode && $m->parentNode->nodeName === 'record_diagnostic') {
+                continue;
+            }
+            $val = trim($m->nodeValue);
+            if ($val !== '' && !in_array($val, $collectedErrors) && !in_array($val, $collectedWarnings)) {
+                $collectedErrors[] = $val;
+            }
+        }
+
+        // 3. Process error elements
+        $errorNodes = $xmlDoc->getElementsByTagName('error');
+        foreach ($errorNodes as $e) {
+            $val = trim($e->nodeValue);
+            if ($val !== '' && !in_array($val, $collectedErrors)) {
+                $collectedErrors[] = $val;
+            }
+        }
+
+        // 4. If root status is Failure/failed and no specific errors found
+        if (in_array(strtolower($result['status'] ?? ''), ['failure', 'failed']) && empty($collectedErrors)) {
+            $collectedErrors[] = 'Crossref rejected deposit with status "Failure"';
+        }
+
+        $result['errors'] = array_values(array_unique($collectedErrors));
+        $result['warnings'] = array_values(array_unique($collectedWarnings));
+
+        return $result;
     }
 
     /**
