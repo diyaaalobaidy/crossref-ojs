@@ -74,8 +74,9 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
                 return true;
             }
 
-            PluginRegistry::register('importexport', new CrossrefExportPlugin($this), $this->getPluginPath());
-            $this->_exportPlugin = PluginRegistry::getPlugin('importexport', 'CrossrefExportPlugin');
+            $exportPlugin = new CrossrefExportPlugin($this);
+            PluginRegistry::register('importexport', $exportPlugin, $this->getPluginPath());
+            $this->_exportPlugin = $exportPlugin;
 
             $this->getCitationDoiHandler()->registerHooks();
 
@@ -516,11 +517,29 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
     }
 
     /**
+     * Get the export plugin instance.
+     */
+    public function getExportPlugin(): ?CrossrefExportPlugin
+    {
+        if ($this->_exportPlugin === null) {
+            $this->_exportPlugin = PluginRegistry::getPlugin('importexport', 'CrossrefExportPlugin');
+            if ($this->_exportPlugin === null) {
+                $this->_exportPlugin = new CrossrefExportPlugin($this);
+            }
+        }
+        return $this->_exportPlugin;
+    }
+
+    /**
      * @inheritDoc
      */
     public function getAllowedDoiTypes(): array
     {
-        return [Repo::doi()::TYPE_PUBLICATION, Repo::doi()::TYPE_ISSUE, Repo::doi()::TYPE_PEER_REVIEW];
+        $types = [Repo::doi()::TYPE_PUBLICATION, Repo::doi()::TYPE_ISSUE];
+        if (defined(Repo::doi()::class . '::TYPE_PEER_REVIEW')) {
+            $types[] = constant(Repo::doi()::class . '::TYPE_PEER_REVIEW');
+        }
+        return $types;
     }
 
     /**

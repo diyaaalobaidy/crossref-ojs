@@ -133,7 +133,11 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
             if (!empty($articleId)) {
                 $article = Repo::submission()->get((int)$articleId);
                 if ($article) {
-                    $publishedDois = Repo::doi()->getPublishedDoisForSubmission($article->getId());
+                    if (method_exists(Repo::doi(), 'getPublishedDoisForSubmission')) {
+                        $publishedDois = Repo::doi()->getPublishedDoisForSubmission($article->getId());
+                    } else {
+                        $publishedDois = Repo::doi()->getDoisForSubmission($article->getId());
+                    }
                     if (empty($publishedDois)) {
                         $publishedDois = Repo::doi()->getDoisForSubmission($article->getId());
                     }
@@ -531,14 +535,23 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
     public function updateDepositStatus(Journal $context, Issue|Submission|ReviewAssignment $object, int $status, ?string $batchId = null, ?string $failedMsg = null, ?string $successMsg = null)
     {
         if ($object instanceof Submission) {
-            $doiIds = Repo::doi()->getPublishedDoisForSubmission($object->getId());
+            if (method_exists(Repo::doi(), 'getPublishedDoisForSubmission')) {
+                $doiIds = Repo::doi()->getPublishedDoisForSubmission($object->getId());
+            } else {
+                $doiIds = Repo::doi()->getDoisForSubmission($object->getId());
+            }
             if (empty($doiIds)) {
                 $doiIds = Repo::doi()->getDoisForSubmission($object->getId());
             }
-        } else if ($object instanceof Issue) {
+        } elseif ($object instanceof Issue) {
             $doiIds = Repo::doi()->getDoisForIssue($object->getId(), true);
         } else {
-            $doiIds = Repo::doi()->getDoisForReviewAssignment($object->getId(), true);
+            if (method_exists(Repo::doi(), 'getDoisForReviewAssignment')) {
+                $doiIds = Repo::doi()->getDoisForReviewAssignment($object->getId(), true);
+            } else {
+                $doiId = method_exists($object, 'getData') ? $object->getData('doiId') : null;
+                $doiIds = $doiId ? [$doiId] : [];
+            }
         }
 
         foreach ($doiIds as $doiId) {
@@ -561,6 +574,68 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
 
             Repo::doi()->edit($doi, $editParams);
         }
+    }
+
+    /**
+     * @copydoc DOIPubIdExportPlugin::markRegistered()
+     */
+    public function markRegistered($context, $objects)
+    {
+        foreach ($objects as $object) {
+            if ($object instanceof Submission) {
+                if (method_exists(Repo::doi(), 'getPublishedDoisForSubmission')) {
+                    $doiIds = Repo::doi()->getPublishedDoisForSubmission($object->getId());
+                } else {
+                    $doiIds = Repo::doi()->getDoisForSubmission($object->getId());
+                }
+                if (empty($doiIds)) {
+                    $doiIds = Repo::doi()->getDoisForSubmission($object->getId());
+                }
+            } elseif ($object instanceof Issue) {
+                $doiIds = Repo::doi()->getDoisForIssue($object->getId(), true);
+            } else {
+                if (method_exists(Repo::doi(), 'getDoisForReviewAssignment')) {
+                    $doiIds = Repo::doi()->getDoisForReviewAssignment($object->getId(), true);
+                } else {
+                    $doiId = method_exists($object, 'getData') ? $object->getData('doiId') : null;
+                    $doiIds = $doiId ? [$doiId] : [];
+                }
+            }
+
+            foreach ($doiIds as $doiId) {
+                Repo::doi()->markRegistered($doiId);
+            }
+        }
+    }
+
+    /**
+     * Get the publications that can be exported/deposited.
+     * Only the last minor versions are considered.
+     */
+    public function getLatestMinorPublications($publications): array
+    {
+        $latestMinorPublications = [];
+        foreach ($publications as $publication) {
+            if (!$publication->getDoi() ||
+                $publication->getData('status') != Submission::STATUS_PUBLISHED) {
+                continue;
+            }
+
+            $versionStage = $publication->getData('versionStage');
+            $versionMajor = $publication->getData('versionMajor');
+            $versionMinor = $publication->getData('versionMinor');
+            if (!array_key_exists($versionStage, $latestMinorPublications)) {
+                $latestMinorPublications[$versionStage] = [];
+            }
+            if (!array_key_exists($versionMajor, $latestMinorPublications[$versionStage])) {
+                $latestMinorPublications[$versionStage][$versionMajor] = $publication;
+                continue;
+            }
+            if ($versionMinor > $latestMinorPublications[$versionStage][$versionMajor]->getData('versionMinor')) {
+                $latestMinorPublications[$versionStage][$versionMajor] = $publication;
+            }
+        }
+        return $latestMinorPublications;
     }
 
     /**

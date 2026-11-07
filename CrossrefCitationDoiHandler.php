@@ -236,13 +236,23 @@ class CrossrefCitationDoiHandler
     protected function getPublicationsToCheck(Submission $submission, Context $context): array
     {
         $publicationsToCheck = [];
+        $statusPublished = defined('APP\submission\Submission::STATUS_PUBLISHED')
+            ? Submission::STATUS_PUBLISHED
+            : (defined('APP\publication\Publication::STATUS_PUBLISHED') ? Publication::STATUS_PUBLISHED : 3);
+
         if (!$context->getData(Context::SETTING_DOI_VERSIONING)) {
             $publication = $submission->getCurrentPublication();
-            if ($publication->getDoi() && $publication->getData('status') == Publication::STATUS_PUBLISHED) {
+            if ($publication->getDoi() && $publication->getData('status') == $statusPublished) {
                 $publicationsToCheck[] = $publication;
             }
         } else {
-            $latestMinorPublications = Repo::doi()->getLatestMinorPublicationsForDoiDeposit($submission->getData('publications'));
+            if (method_exists(Repo::doi(), 'getLatestMinorPublicationsForDoiDeposit')) {
+                $latestMinorPublications = Repo::doi()->getLatestMinorPublicationsForDoiDeposit($submission->getData('publications'));
+            } elseif (method_exists($this->plugin->getExportPlugin(), 'getLatestMinorPublications')) {
+                $latestMinorPublications = $this->plugin->getExportPlugin()->getLatestMinorPublications($submission->getData('publications'));
+            } else {
+                $latestMinorPublications = [[$submission->getCurrentPublication()]];
+            }
             foreach ($latestMinorPublications as $publicationsByMajor) {
                 foreach ($publicationsByMajor as $publication) {
                     $publicationsToCheck[] = $publication;

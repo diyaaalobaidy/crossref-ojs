@@ -103,19 +103,43 @@ class IssueCrossrefXmlFilter extends \PKP\plugins\importexport\native\filter\Nat
 
         $journalMetadataNode = $doc->createElementNS($deployment->getNamespace(), 'journal_metadata');
         // Full title
-        $journalTitle = $pubObject->getPrimaryContextName($context);
-        $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'full_title', htmlspecialchars($journalTitle, ENT_COMPAT, 'UTF-8')));
+        if (method_exists($pubObject, 'getPrimaryContextName')) {
+            $journalTitle = $pubObject->getPrimaryContextName($context);
+        } else {
+            $journalTitle = $context->getName($context->getPrimaryLocale());
+            if ($journalTitle == '') {
+                $journalTitle = $context->getData('abbreviation', $context->getPrimaryLocale());
+            }
+        }
+        $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'full_title', htmlspecialchars($journalTitle ?? '', ENT_COMPAT, 'UTF-8')));
+
         // Abbreviated title — falling back to the journal acronym if no abbreviation is set.
-        if ($journalAbbrev = $pubObject->getPrimaryContextAbbreviation($context)) {
+        if (method_exists($pubObject, 'getPrimaryContextAbbreviation')) {
+            $journalAbbrev = $pubObject->getPrimaryContextAbbreviation($context);
+        } else {
+            $journalAbbrev = $context->getData('abbreviation', $context->getPrimaryLocale());
+            if ($journalAbbrev == '') {
+                $journalAbbrev = $context->getData('acronym', $context->getPrimaryLocale());
+            }
+        }
+        if ($journalAbbrev) {
             $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'abbrev_title', htmlspecialchars($journalAbbrev, ENT_COMPAT, 'UTF-8')));
         }
+
         // Both online and print ISSNs are permitted by Crossref — send whichever are available.
-        if ($issn = $pubObject->getOnlineIssn($context)) {
-            $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'issn', $issn));
+        $onlineIssn = method_exists($pubObject, 'getOnlineIssn')
+            ? $pubObject->getOnlineIssn($context)
+            : $context->getData('onlineIssn');
+        if ($onlineIssn) {
+            $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'issn', $onlineIssn));
             $node->setAttribute('media_type', 'electronic');
         }
-        if ($issn = $pubObject->getPrintIssn($context)) {
-            $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'issn', $issn));
+
+        $printIssn = method_exists($pubObject, 'getPrintIssn')
+            ? $pubObject->getPrintIssn($context)
+            : $context->getData('printIssn');
+        if ($printIssn) {
+            $journalMetadataNode->appendChild($node = $doc->createElementNS($deployment->getNamespace(), 'issn', $printIssn));
             $node->setAttribute('media_type', 'print');
         }
         return $journalMetadataNode;

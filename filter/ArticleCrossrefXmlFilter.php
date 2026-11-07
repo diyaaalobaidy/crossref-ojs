@@ -90,7 +90,13 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
                 $journalNode = $this->createSubmissionJournalNode($doc, $pubObject, $publication);
                 $bodyNode->appendChild($journalNode);
             } else {
-                $latestMinorPublications = Repo::doi()->getLatestMinorPublicationsForDoiDeposit($pubObject->getData('publications'));
+                if (method_exists(Repo::doi(), 'getLatestMinorPublicationsForDoiDeposit')) {
+                    $latestMinorPublications = Repo::doi()->getLatestMinorPublicationsForDoiDeposit($pubObject->getData('publications'));
+                } elseif (method_exists($plugin, 'getLatestMinorPublications')) {
+                    $latestMinorPublications = $plugin->getLatestMinorPublications($pubObject->getData('publications'));
+                } else {
+                    $latestMinorPublications = [[$pubObject->getCurrentPublication()]];
+                }
                 foreach ($latestMinorPublications as $publicationsByMajor) {
                     foreach ($publicationsByMajor as $publication) {
                         $journalNode = $this->createSubmissionJournalNode($doc, $pubObject, $publication);
@@ -346,47 +352,58 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
 
         $contributorsNode = $doc->createElementNS($deployment->getNamespace(), 'contributors');
 
-        $isFirst = true;
-        foreach ($publication->getData('authors') as $author) {
-            /** @var Author $author */
-            $contribRoleIds = $author->getContributorRoleIdentifiers();
+        $hasContributorRoles = class_exists(ContributorRoleIdentifier::class) && method_exists(\APP\author\Author::class, 'getContributorRoleIdentifiers');
+        $hasContributorTypes = class_exists(ContributorType::class);
 
-            // Role 'other' not supported yet in 5.4.0, do not export that role and skip if no other roles are assigned.
-            $contribRoleIds = array_values(array_diff($contribRoleIds, [ContributorRoleIdentifier::OTHER->getName()]));
-            if (empty($contribRoleIds)) {
-                continue;
+        $isFirst = true;
+        $authors = $publication->getData('authors') ?? [];
+        foreach ($authors as $author) {
+            /** @var \APP\author\Author $author */
+            $contributorRole = 'author';
+            if ($hasContributorRoles) {
+                $contribRoleIds = $author->getContributorRoleIdentifiers();
+
+                // Role 'other' not supported yet in 5.4.0, do not export that role and skip if no other roles are assigned.
+                $contribRoleIds = array_values(array_diff($contribRoleIds, [ContributorRoleIdentifier::OTHER->getName()]));
+                if (empty($contribRoleIds)) {
+                    continue;
+                }
+
+                // Crossref allows only one role per person_name
+                // prioritize AUTHOR role if present, otherwise use the first role in the list
+                // https://www.crossref.org/documentation/schema-library/markup-guide-metadata-segments/contributors/#00011
+                $contributorRole = in_array(ContributorRoleIdentifier::AUTHOR->getName(), $contribRoleIds)
+                    ? ContributorRoleIdentifier::AUTHOR->getName()
+                    : $contribRoleIds[0];
+
+                $contributorRole = strtolower(str_replace('_', '-', $contributorRole));
             }
 
-            // Crossref allows only one role per person_name
-            // prioritize AUTHOR role if present, otherwise use the first role in the list
-            // https://www.crossref.org/documentation/schema-library/markup-guide-metadata-segments/contributors/#00011
-            $contributorRole = in_array(ContributorRoleIdentifier::AUTHOR->getName(), $contribRoleIds)
-                ? ContributorRoleIdentifier::AUTHOR->getName()
-                : $contribRoleIds[0];
-
-            $contributorRole = strtolower(str_replace('_', '-', $contributorRole));
-            $contributorType = $author->getData('contributorType');
             $sequence = $isFirst ? 'first' : 'additional';
 
-            // Contributor type ORGANIZATION
-            if ($contributorType === ContributorType::ORGANIZATION->getName()) {
-                $organizationNode = $doc->createElementNS($deployment->getNamespace(), 'organization', htmlspecialchars($author->getLocalizedOrganizationName($locale), ENT_COMPAT, 'UTF-8'));
-                $organizationNode->setAttribute('contributor_role', $contributorRole);
-                $organizationNode->setAttribute('sequence', $sequence);
-                $contributorsNode->appendChild($organizationNode);
-                $isFirst = false;
-                continue;
-            }
+            if ($hasContributorTypes) {
+                $contributorType = $author->getData('contributorType');
 
-            // Contributor type ANONYMOUS
-            if ($contributorType === ContributorType::ANONYMOUS->getName()) {
-                $anonymousNode = $doc->createElementNS($deployment->getNamespace(), 'anonymous');
-                $anonymousNode->setAttribute('contributor_role', $contributorRole);
-                $anonymousNode->setAttribute('sequence', $sequence);
-                $this->appendAffiliationsNode($doc, $anonymousNode, $author, $locale);
-                $contributorsNode->appendChild($anonymousNode);
-                $isFirst = false;
-                continue;
+                // Contributor type ORGANIZATION
+                if ($contributorType === ContributorType::ORGANIZATION->getName()) {
+                    $organizationNode = $doc->createElementNS($deployment->getNamespace(), 'organization', htmlspecialchars($author->getLocalizedOrganizationName($locale) ?? '', ENT_COMPAT, 'UTF-8'));
+                    $organizationNode->setAttribute('contributor_role', $contributorRole);
+                    $organizationNode->setAttribute('sequence', $sequence);
+                    $contributorsNode->appendChild($organizationNode);
+                    $isFirst = false;
+                    continue;
+                }
+
+                // Contributor type ANONYMOUS
+                if ($contributorType === ContributorType::ANONYMOUS->getName()) {
+                    $anonymousNode = $doc->createElementNS($deployment->getNamespace(), 'anonymous');
+                    $anonymousNode->setAttribute('contributor_role', $contributorRole);
+                    $anonymousNode->setAttribute('sequence', $sequence);
+                    $this->appendAffiliationsNode($doc, $anonymousNode, $author, $locale);
+                    $contributorsNode->appendChild($anonymousNode);
+                    $isFirst = false;
+                    continue;
+                }
             }
 
             // Contributor type PERSON
@@ -394,8 +411,8 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
             $personNameNode->setAttribute('contributor_role', $contributorRole);
             $personNameNode->setAttribute('sequence', $sequence);
 
-            $familyNames = $author->getFamilyName(null);
-            $givenNames = $author->getGivenName(null);
+            $familyNames = $author->getFamilyName(null) ?? [];
+            $givenNames = $author->getGivenName(null) ?? [];
 
             // Check if both givenName and familyName is set for the submission language.
             if (!empty($familyNames[$locale]) && !empty($givenNames[$locale])) {
@@ -403,7 +420,8 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
                 $personNameNode->appendChild($doc->createElementNS($deployment->getNamespace(), 'given_name', htmlspecialchars($givenNames[$locale], ENT_COMPAT, 'UTF-8')));
                 $personNameNode->appendChild($doc->createElementNS($deployment->getNamespace(), 'surname', htmlspecialchars($familyNames[$locale], ENT_COMPAT, 'UTF-8')));
             } else {
-                $personNameNode->appendChild($doc->createElementNS($deployment->getNamespace(), 'surname', htmlspecialchars($givenNames[$locale], ENT_COMPAT, 'UTF-8')));
+                $name = !empty($givenNames[$locale]) ? $givenNames[$locale] : (!empty($familyNames[$locale]) ? $familyNames[$locale] : $author->getLocalizedGivenName());
+                $personNameNode->appendChild($doc->createElementNS($deployment->getNamespace(), 'surname', htmlspecialchars($name ?? '', ENT_COMPAT, 'UTF-8')));
             }
 
             $this->appendAffiliationsNode($doc, $personNameNode, $author, $locale);
@@ -521,7 +539,7 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
 
         $funders = $submission->getData('funders');
 
-        if ($funders->isEmpty()) {
+        if (empty($funders) || (is_object($funders) && method_exists($funders, 'isEmpty') && $funders->isEmpty()) || (is_countable($funders) && count($funders) === 0)) {
             return;
         }
 
@@ -683,15 +701,15 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
         $deployment = $this->getDeployment();
 
         $citations = $publication->getData('citations');
-        if ($citations->isNotEmpty()) {
+        if (!empty($citations) && ((is_object($citations) && method_exists($citations, 'isNotEmpty') && $citations->isNotEmpty()) || (is_countable($citations) && count($citations) > 0))) {
             $citationListNode = $doc->createElementNS($deployment->getNamespace(), 'citation_list');
             foreach ($citations as $citation) {
                 /** @var Citation $citation */
                 $rawCitation = strip_tags($citation->getRawCitation());
-                $isStructured = $citation->isStructured();
+                $isStructured = method_exists($citation, 'isStructured') && $citation->isStructured();
                 if (!empty($rawCitation)) {
                     $citationNode = $doc->createElementNS($deployment->getNamespace(), 'citation');
-                    $citationNode->setAttribute('key', $citation->getId());
+                    $citationNode->setAttribute('key', (string)$citation->getId());
                     if ($isStructured) {
                         $this->appendStructuredCitationElements($doc, $citationNode, $citation);
                     } elseif ($citationDoi = $citation->getData('doi')) {
@@ -706,7 +724,9 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
                     $citationListNode->appendChild($citationNode);
                 }
             }
-            $parentNode->appendChild($citationListNode);
+            if ($citationListNode->hasChildNodes()) {
+                $parentNode->appendChild($citationListNode);
+            }
         }
     }
 
@@ -718,13 +738,24 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
         /** @var CrossrefExportDeployment $deployment */
         $deployment = $this->getDeployment();
 
+        $hasCitationSourceType = enum_exists('PKP\citation\enum\CitationSourceType');
+        $hasCitationType = enum_exists('PKP\citation\enum\CitationType');
+
+        $journalSourceTypeValue = $hasCitationSourceType ? CitationSourceType::JOURNAL->value : 'journal';
+        $journalTypeValue = $hasCitationType ? CitationType::JOURNAL->value : 'journal';
+        $bookSeriesSourceTypeValue = $hasCitationSourceType ? CitationSourceType::BOOK_SERIES->value : 'book-series';
+        $bookSeriesTypeValue = $hasCitationType ? CitationType::BOOK_SERIES->value : 'book-series';
+        $bookTypeValue = $hasCitationType ? CitationType::BOOK->value : 'book';
+        $monographTypeValue = $hasCitationType ? CitationType::MONOGRAPH->value : 'monograph';
+        $journalArticleTypeValue = $hasCitationType ? CitationType::JOURNAL_ARTICLE->value : 'journal-article';
+
         if ($issn = $citation->getData('sourceIssn')) {
             $issnNode = $doc->createElementNS($deployment->getNamespace(), 'issn', $issn);
             $parentNode->appendChild($issnNode);
         }
         if (
-            ($citation->getData('sourceType') == CitationSourceType::JOURNAL->value && $journalTitle = $citation->getData('sourceName')) ||
-            ($citation->getData('type') == CitationSourceType::JOURNAL->value && $journalTitle = $citation->getData('title'))
+            ($citation->getData('sourceType') == $journalSourceTypeValue && $journalTitle = $citation->getData('sourceName')) ||
+            ($citation->getData('type') == $journalSourceTypeValue && $journalTitle = $citation->getData('title'))
         ) {
             $journalTitleNode = $doc->createElementNS($deployment->getNamespace(), 'journal_title');
             $journalTitleNode->appendChild($doc->createTextNode($journalTitle));
@@ -765,22 +796,22 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
             $parentNode->appendChild($doiNode);
         }
         if (
-            ($citation->getData('sourceType') == CitationSourceType::BOOK_SERIES->value && $seriesTitle = $citation->getData('sourceName')) ||
-            ($citation->getData('type') == CitationType::BOOK_SERIES->value && $seriesTitle = $citation->getData('title'))
+            ($citation->getData('sourceType') == $bookSeriesSourceTypeValue && $seriesTitle = $citation->getData('sourceName')) ||
+            ($citation->getData('type') == $bookSeriesTypeValue && $seriesTitle = $citation->getData('title'))
         ) {
             $seriesTitleNode = $doc->createElementNS($deployment->getNamespace(), 'series_title');
             $seriesTitleNode->appendChild($doc->createTextNode($seriesTitle));
             $parentNode->appendChild($seriesTitleNode);
         }
         if (
-            ($citation->getData('type') == CitationType::BOOK->value || $citation->getData('type') == CitationType::MONOGRAPH->value) &&
+            ($citation->getData('type') == $bookTypeValue || $citation->getData('type') == $monographTypeValue) &&
             $volumeTitle = $citation->getData('title')
         ) {
             $volumeTitleNode = $doc->createElementNS($deployment->getNamespace(), 'volume_title');
             $volumeTitleNode->appendChild($doc->createTextNode($volumeTitle));
             $parentNode->appendChild($volumeTitleNode);
         }
-        if ($citation->getData('type') == CitationType::JOURNAL_ARTICLE->value && $articleTitle = $citation->getData('title')) {
+        if ($citation->getData('type') == $journalArticleTypeValue && $articleTitle = $citation->getData('title')) {
             $articleTitleNode = $doc->createElementNS($deployment->getNamespace(), 'article_title');
             $articleTitleNode->appendChild($doc->createTextNode($articleTitle));
             $parentNode->appendChild($articleTitleNode);
@@ -848,11 +879,15 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
         // updates
         // In-situ: only relevant when crossmark is enabled — another published version shares this DOI
         // (no-DOI-versioning case, or minor versions within a major when DOI versioning is on)
+        $statusPublished = defined('PKP\publication\PKPPublication::STATUS_PUBLISHED')
+            ? PKPPublication::STATUS_PUBLISHED
+            : Submission::STATUS_PUBLISHED;
+
         $isInSitu = $plugin->getSetting($context->getId(), 'crossmark') &&
             Repo::publication()->getCollector()
                 ->filterBySubmissionIds([$publication->getData('submissionId')])
                 ->filterByDoiIds([$publication->getData('doiId')])
-                ->filterByStatus([PKPPublication::STATUS_PUBLISHED])
+                ->filterByStatus([$statusPublished])
                 ->getMany()
                 ->contains(fn($p) => $p->getId() !== $publication->getId());
 
@@ -938,20 +973,37 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
      * Create a rel:related_item node for a data citation
      * 
      * @param DOMDocument $doc
-     * @param DataCitation $dataCitation
+     * @param mixed $dataCitation
      * 
      * @return DOMElement|null
      *
      */
-    public function createDataCitationRelatedItemNode(DOMDocument $doc, DataCitation $dataCitation): ?DOMElement
+    public function createDataCitationRelatedItemNode(DOMDocument $doc, $dataCitation): ?DOMElement
     {
         /** @var CrossrefExportDeployment $deployment */
         $deployment = $this->getDeployment();
 
+        if (is_object($dataCitation) && method_exists($dataCitation, 'getAttribute')) {
+            $identifier = $dataCitation->getAttribute('identifier');
+            $identifierType = $dataCitation->getAttribute('identifierType');
+            $url = $dataCitation->getAttribute('url');
+            $title = $dataCitation->getAttribute('title');
+            $relType = $dataCitation->getAttribute('relationshipType');
+        } elseif (is_array($dataCitation)) {
+            $identifier = $dataCitation['identifier'] ?? null;
+            $identifierType = $dataCitation['identifierType'] ?? null;
+            $url = $dataCitation['url'] ?? null;
+            $title = $dataCitation['title'] ?? null;
+            $relType = $dataCitation['relationshipType'] ?? null;
+        } else {
+            return null;
+        }
+
         // Only include data citations that have an identifier (DOI, URL, etc.) and a relationship type
-        if (($identifier = $dataCitation->getAttribute('identifier')) && ($identifierType = $dataCitation->getAttribute('identifierType'))) {
+        if ($identifier && $identifierType) {
             $identifierType = strtolower($identifierType);
-        } elseif ($identifier = $dataCitation->getAttribute('url')) {
+        } elseif ($url) {
+            $identifier = $url;
             $identifierType = 'uri';
         } else {
             return null;
@@ -964,10 +1016,10 @@ class ArticleCrossrefXmlFilter extends IssueCrossrefXmlFilter
             'analyzed' => 'references',
             'non-analyzed' => 'references',
         ];
-        $relationshipType = $relationshipTypeMapping[$dataCitation->getAttribute('relationshipType')] ?? 'references';
+        $relationshipType = $relationshipTypeMapping[$relType ?? ''] ?? 'references';
 
         $relatedItemNode = $doc->createElementNS($deployment->getRelNamespace(), 'rel:related_item');
-        if ($title = $dataCitation->getAttribute('title')) {
+        if ($title) {
             $descriptionNode = $doc->createElementNS($deployment->getRelNamespace(), 'rel:description', htmlspecialchars($title, ENT_COMPAT, 'UTF-8'));
             $relatedItemNode->appendChild($descriptionNode);
         }
