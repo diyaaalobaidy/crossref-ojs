@@ -249,6 +249,15 @@ class CrossrefExportPlugin extends DOIPubIdExportPlugin
     // Settings and configuration methods
 
     /**
+     * Get request failed message setting name.
+     * Note: Since 3.4 the separator is underscore (_) instead of double colon (::).
+     */
+    public function getFailedMsgSettingName(): string
+    {
+        return $this->getPluginSettingsPrefix() . '_failedMsg';
+    }
+
+    /**
      * Get deposit batch ID setting name.
      * Note: Since 3.4 the separator is underscore (_) instead of double colon (::).
      */

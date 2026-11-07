@@ -163,9 +163,9 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
         $schema = &$args[0];
 
         $settings = [
-            $this->_exportPlugin->getDepositBatchIdSettingName(),
-            $this->_exportPlugin->getFailedMsgSettingName(),
-            $this->_exportPlugin->getSuccessMsgSettingName(),
+            $this->_exportPlugin?->getDepositBatchIdSettingName() ?? 'crossrefplugin_batchId',
+            $this->_exportPlugin?->getFailedMsgSettingName() ?? 'crossrefplugin_failedMsg',
+            $this->_exportPlugin?->getSuccessMsgSettingName() ?? 'crossrefplugin_successMsg',
         ];
 
         foreach ($settings as $settingName) {
@@ -480,8 +480,10 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
     public function editMarkRegisteredParams(string $hookName, array $args): bool
     {
         $editParams = &$args[0];
-        $editParams[$this->_exportPlugin->getFailedMsgSettingName()] = null;
-        $editParams[$this->_exportPlugin->getSuccessMsgSettingName()] = null;
+        $failedKey = $this->_exportPlugin?->getFailedMsgSettingName() ?? 'crossrefplugin_failedMsg';
+        $successKey = $this->_exportPlugin?->getSuccessMsgSettingName() ?? 'crossrefplugin_successMsg';
+        $editParams[$failedKey] = null;
+        $editParams[$successKey] = null;
         return false;
     }
 
@@ -490,7 +492,7 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
      */
     public function getErrorMessageKey(): ?string
     {
-        return $this->_exportPlugin->getFailedMsgSettingName();
+        return $this->_exportPlugin?->getFailedMsgSettingName() ?? 'crossrefplugin_failedMsg';
     }
 
     /**
@@ -498,7 +500,7 @@ class CrossrefPlugin extends GenericPlugin implements IDoiRegistrationAgency, Ha
      */
     public function getRegisteredMessageKey(): ?string
     {
-        return $this->_exportPlugin->getSuccessMsgSettingName();
+        return $this->_exportPlugin?->getSuccessMsgSettingName() ?? 'crossrefplugin_successMsg';
     }
 
     /**
